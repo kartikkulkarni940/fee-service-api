@@ -5,6 +5,7 @@ import com.school.feeservice.dto.ReceiptRequestDTO;
 import com.school.feeservice.dto.ReceiptResponseDTO;
 import com.school.feeservice.dto.StudentClientResponse;
 import com.school.feeservice.entity.Receipt;
+import com.school.feeservice.exception.DuplicatePaymentException;
 import com.school.feeservice.exception.ReceiptNotFoundException;
 import com.school.feeservice.exception.StudentNotFoundException;
 import com.school.feeservice.repository.ReceiptRepository;
@@ -16,6 +17,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -31,40 +34,39 @@ public class ReceiptServiceImpl implements ReceiptService {
     private final StudentClient studentClient;
 
     /**
-     * Collects student fee and generates a receipt.
-     * Steps:
-     * 1. Calls Student Service via Feign to validate student.
-     * 2. If student exists, creates and saves a receipt with paymentStatus=SUCCESS.
-     * 3. If Student Service fails, fallback method saves it as PENDING.
-     *
-     * @param request the fee collection details (studentId, amount, paymentMode, etc.)
-     * @return ReceiptResponseDTO containing saved receipt details
+     * Handles fee collection workflow:
+     * 1. Validates duplicate payment
+     * 2. Fetches student info (wrapped with CircuitBreaker)
+     * 3. Saves successful receipt
      */
     @Override
-    @CircuitBreaker(name = "studentServiceCB", fallbackMethod = "handleStudentServiceFailure")
-    @Retry(name = "studentServiceCB")
     public ReceiptResponseDTO processFeePayment(ReceiptRequestDTO request) {
-        log.info("Collecting fee for studentId={}, amount={}, mode={}", request.getStudentId(), request.getAmount(), request.getPaymentMode());
+        log.info("Processing fee for studentId={}, amount={}, mode={}",
+                request.getStudentId(), request.getAmount(), request.getPaymentMode());
 
-        StudentClientResponse student;
-        try {
-            student = studentClient.getByStudentId(request.getStudentId());
-        } catch (Exception ex) {
-            log.error("Student service call failed for {} : {}", request.getStudentId(), ex.getMessage());
-            throw new StudentNotFoundException("Student not found: " + request.getStudentId());
+        //   Duplicate payment validation (no CB involvement)
+        LocalDate today = LocalDate.now();
+        LocalDateTime start = today.withDayOfMonth(1).atStartOfDay();
+        LocalDateTime end = today.withDayOfMonth(today.lengthOfMonth()).atTime(23, 59, 59);
+
+        boolean alreadyPaid = repository.existsByStudentIdAndPaymentDateBetween(request.getStudentId(), start, end);
+        if (alreadyPaid) {
+            log.warn("Duplicate payment detected for studentId={}", request.getStudentId());
+            throw new DuplicatePaymentException("Fees for this month already paid for student: " + request.getStudentId());
         }
 
-        if (student == null || student.getStudentId() == null) {
-            log.warn("Student not found for id {}", request.getStudentId());
-            throw new StudentNotFoundException("Student not found: " + request.getStudentId());
-        }
+        //  Fetch student info (wrapped by CB)
+        StudentClientResponse student = getStudentDetailsWithResilience(request.getStudentId());
 
+        //  Save successful payment
         Receipt entity = ReceiptMapper.toEntity(request);
         entity.setPaymentStatus("SUCCESS");
         Receipt saved = repository.save(entity);
 
-        log.info("Receipt saved id={}, receiptNumber={}, status={}", saved.getId(), saved.getReceiptNumber(), saved.getPaymentStatus());
+        log.info("Receipt saved id={}, receiptNumber={}, status={}",
+                saved.getId(), saved.getReceiptNumber(), saved.getPaymentStatus());
 
+        //  Prepare response
         ReceiptResponseDTO response = ReceiptMapper.toDto(saved);
         response.setStudentName(student.getName());
         response.setGrade(student.getGrade());
@@ -73,69 +75,55 @@ public class ReceiptServiceImpl implements ReceiptService {
 
         return response;
     }
+
     /**
-     * Fallback method triggered when Student Service is unavailable.
-     * Saves the receipt as PENDING, masks sensitive data,
-     * and returns a safe fallback response.
-     *
-     * @param request the original fee collection request
-     * @param ex      the exception from the failed Student Service call
-     * @return fallback ReceiptResponseDTO marked as PENDING
+     * Feign call wrapped with CircuitBreaker + Retry.
+     * Only network failures will trigger fallback.
      */
-    private ReceiptResponseDTO handleStudentServiceFailure(ReceiptRequestDTO request, Throwable ex) {
-        log.error("Fallback triggered - Student service unavailable for studentId={} : {}", request.getStudentId(), ex.getMessage());
-
-        //  Build entity with fallback status
-        Receipt entity = ReceiptMapper.toEntity(request);
-        entity.setPaymentStatus("PENDING");
-
-        //  Save pending receipt
-        Receipt saved = repository.save(entity);
-
-        //  fallback response
-        ReceiptResponseDTO response = ReceiptMapper.toDto(saved);
-        response.setStudentName("N/A");
-        response.setGrade("N/A");
-        response.setSchoolName("N/A");
-        response.setRemarks("Student service unavailable, stored as pending");
-
-        // Mask card number if payment mode is CARD
-        if ("CARD".equalsIgnoreCase(request.getPaymentMode()) && request.getCardNumber() != null) {
-            response.setCardNumber(ReceiptMapper.maskCardNumber(request.getCardNumber()));
-        } else {
-            response.setCardNumber(null);
+    @CircuitBreaker(name = "studentServiceCB", fallbackMethod = "handleStudentServiceFailure")
+    @Retry(name = "studentServiceCB")
+    private StudentClientResponse getStudentDetailsWithResilience(String studentId) {
+        log.info("Calling Student Service for studentId={}", studentId);
+        StudentClientResponse student = studentClient.getByStudentId(studentId);
+        if (student == null || student.getStudentId() == null) {
+            throw new StudentNotFoundException("Student not found: " + studentId);
         }
-
-        return response;
+        return student;
     }
 
+    /**
+     * Fallback when Student Service is down/unreachable.
+     */
+    private StudentClientResponse handleStudentServiceFailure(String studentId, Throwable ex) {
+        log.error("Fallback triggered - Student service unavailable for studentId={} : {}", studentId, ex.getMessage());
+        StudentClientResponse fallback = new StudentClientResponse();
+        fallback.setStudentId(studentId);
+        fallback.setName("N/A");
+        fallback.setGrade("N/A");
+        fallback.setSchoolName("N/A");
+        return fallback;
+    }
 
     /**
-     * Fetches a single receipt by its unique ID.
-     * Throws ReceiptNotFoundException if not found.
-     *
-     * @param id receipt database ID
-     * @return the corresponding ReceiptResponseDTO
+     * Get receipt by ID
      */
     @Override
     public ReceiptResponseDTO getReceipt(Long id) {
         log.info("Fetching receipt by id={}", id);
-        Receipt receipt = repository.findById(id).orElseThrow(() -> new ReceiptNotFoundException("Receipt not found: " + id));
-        log.debug("Receipt found for id={}", id);
+        Receipt receipt = repository.findById(id)
+                .orElseThrow(() -> new ReceiptNotFoundException("Receipt not found: " + id));
         return ReceiptMapper.toDto(receipt);
     }
 
     /**
-     * Retrieves all receipts associated with a specific student.
-     *
-     * @param studentId student’s business ID (e.g., S-ABC123)
-     * @return list of ReceiptResponseDTO for that student
+     * Get all receipts by studentId
      */
     @Override
     public List<ReceiptResponseDTO> getReceiptsByStudent(String studentId) {
         log.info("Fetching all receipts for studentId={}", studentId);
-        List<ReceiptResponseDTO> receipts = repository.findByStudentId(studentId).stream().map(ReceiptMapper::toDto).collect(Collectors.toList());
-        log.debug("Found {} receipts for studentId={}", receipts.size(), studentId);
-        return receipts;
+        return repository.findByStudentId(studentId)
+                .stream()
+                .map(ReceiptMapper::toDto)
+                .collect(Collectors.toList());
     }
 }

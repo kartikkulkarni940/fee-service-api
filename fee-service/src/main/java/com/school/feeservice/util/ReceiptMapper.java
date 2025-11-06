@@ -48,7 +48,7 @@ public class ReceiptMapper {
                 .paymentStatus(entity.getPaymentStatus())
                 .remarks(entity.getRemarks())
                 .paymentDate(entity.getPaymentDate())
-                .cardNumber(entity.getCardNumber()) // ✅ already masked in DB
+                .cardNumber(entity.getCardNumber()) //  already masked in DB
                 .build();
     }
 

@@ -59,6 +59,13 @@ resilience4j:
           - org.springframework.web.client.RestClientException
           - feign.FeignException
           - java.io.IOException
+        ignore-exceptions:
+          - feign.FeignException$BadRequest
+          - feign.FeignException$NotFound
+          - com.school.feeservice.exception.DuplicatePaymentException
+          - com.school.feeservice.exception.StudentNotFoundException
+          - jakarta.validation.ValidationException
+
 
   retry:
     instances:
