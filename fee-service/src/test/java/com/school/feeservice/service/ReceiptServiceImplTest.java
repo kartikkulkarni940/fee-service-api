@@ -60,6 +60,15 @@ class ReceiptServiceImplTest {
                 .paymentStatus("SUCCESS")
                 .remarks("Initial test")
                 .build();
+        savedReceipt = Receipt.builder()
+                .id(1L)
+                .receiptNumber("REC-1001")
+                .studentId("S-12345")
+                .amount(5000.0)
+                .paymentMode("CREDIT_CARD")
+                .paymentStatus("SUCCESS")
+                .remarks("Initial test")
+                .build();
     }
 
     @Test
