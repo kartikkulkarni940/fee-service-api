@@ -147,4 +147,12 @@ class ReceiptServiceImplTest {
         assertThat(result.get(0).getStudentId()).isEqualTo("S-12345");
         verify(repository, times(1)).findByStudentId("S-12345");
     }
+    @Test
+    void testProcessFeePayment_StudentNotFound1() {
+        when(studentClient.getByStudentId(anyString())).thenReturn(null);
+
+        assertThatThrownBy(() -> service.processFeePayment(request))
+                .isInstanceOf(StudentNotFoundException.class)
+                .hasMessageContaining("Student not found");
+    }
 }
