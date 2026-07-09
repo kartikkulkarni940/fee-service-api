@@ -26,6 +26,7 @@ public class NEWDTO {
     private String remarks;
 
     @Pattern(regexp = "^(SUCCESS|PENDING|FAILED)$", message = "Invalid payment status")
+  //git   @Pattern(regexp = "^(SUCCESS|PENDING|FAILED)$", message = "Invalid payment status")git
     private String paymentStatus;
 
     // Conditional field: required only if paymentMode == CARD
