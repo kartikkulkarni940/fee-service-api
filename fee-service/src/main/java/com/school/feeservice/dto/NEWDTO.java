@@ -22,6 +22,7 @@ public class NEWDTO {
     @NotBlank(message = "Payment mode is required")
     @Pattern(regexp = "^(CARD|UPI|CASH)$", message = "Payment mode must be CARD, UPI, or CASH")
     private String paymentMode;
+    private String paymentMode12;
 
     private String remarks;
 
